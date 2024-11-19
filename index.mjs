@@ -1,14 +1,8 @@
 import puppeteer from 'puppeteer';
 import fs from 'fs/promises';
 
-function delay(time) {
-  return new Promise(function(resolve) { 
-      setTimeout(resolve, time)
-  });
-}
-
 async function initBrowser() {
-  const browser = await puppeteer.launch({ headless: false });
+  const browser = await puppeteer.launch({ headless: true });
   const page = await browser.newPage();
   await page.setViewport({width: 1080, height: 1024});
   return { browser, page };
@@ -19,7 +13,10 @@ async function searchGoogleMaps(page, searchQuery) {
   await page.locator('#searchboxinput').fill(searchQuery);
   await page.locator('#searchbox-searchbutton').click();
   await page.waitForSelector(`[aria-label="Results for ${searchQuery}"]`);
-  await delay(2000);
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 class RestaurantScraper {
@@ -31,7 +28,10 @@ class RestaurantScraper {
   async scrollToEnd() {
     try {
       await this.page.waitForSelector('div[role="feed"]');
-      await delay(3000);
+      await this.page.waitForFunction(() => {
+        const feed = document.querySelector('div[role="feed"]');
+        return feed && feed.children.length > 0;
+      });
 
       console.log("Scrolling to load all restaurants...");
       let lastHeight = await this.page.evaluate(() => 
@@ -45,7 +45,15 @@ class RestaurantScraper {
           const feed = document.querySelector('div[role="feed"]');
           feed.scrollTo(0, feed.scrollHeight * 2);
         });
-        await delay(2000);
+        
+        await this.page.waitForFunction(
+          (prevHeight) => {
+            const feed = document.querySelector('div[role="feed"]');
+            return feed.scrollHeight > prevHeight;
+          },
+          {},
+          lastHeight
+        );
 
         // Check for end of list
         const endOfList = await this.page.evaluate(() => {
@@ -69,7 +77,11 @@ class RestaurantScraper {
         );
 
         if (newHeight === lastHeight) {
-          await delay(2000);
+          await this.page.waitForFunction(() => {
+            const loadingIndicator = document.querySelector('.loading-indicator');
+            return !loadingIndicator || loadingIndicator.style.display === 'none';
+          }, { timeout: 2000 }).catch(() => {});
+
           const finalCheck = await this.page.evaluate(() =>
             document.querySelector('div[role="feed"]').scrollHeight
           );
@@ -143,16 +155,67 @@ class RestaurantScraper {
           await this.page.evaluate((link) => {
             link.scrollIntoView();
           }, restaurantLinks[i]);
-          await delay(500);
+          
+          await this.page.waitForFunction(
+            (link) => {
+              const rect = link.getBoundingClientRect();
+              return rect.top >= 0 && rect.bottom <= window.innerHeight;
+            },
+            {},
+            restaurantLinks[i]
+          );
 
-          await restaurantLinks[i].click();
-          await delay(2000);
+          // Add retry mechanism for clicking and waiting
+          let retryCount = 0;
+          const maxRetries = 3;
+          let success = false;
+
+          while (!success && retryCount < maxRetries) {
+            try {
+              await restaurantLinks[i].click();
+              
+              // Wait for both conditions with a reasonable timeout
+              await this.page.waitForFunction(
+                () => {
+                  const mainDivs = document.querySelectorAll('div[role="main"]');
+                  return mainDivs.length >= 2;
+                },
+                { timeout: 2000 * (retryCount + 1) }
+              );
+              
+              success = true;
+            } catch (error) {
+              retryCount++;
+              console.log(`Retry ${retryCount}/${maxRetries} for restaurant ${i + 1}`);
+              // Wait a bit before retrying
+              await delay(1000);
+            }
+          }
+
+          if (!success) {
+            console.error(`Failed to open details for restaurant ${i + 1} after ${maxRetries} attempts`);
+            continue;
+          }
 
           const restaurantInfo = await this.extractRestaurantInfo();
           if (restaurantInfo) {
             restaurantsData.push(restaurantInfo);
             console.log(`Scraped: ${restaurantInfo.name}`);
           }
+
+          // Get specifically the second div[role="main"] and its Close button
+          await this.page.evaluate(() => {
+            const mainDivs = document.querySelectorAll('div[role="main"]');
+            const closeButton = mainDivs[1].querySelector('button[aria-label="Close"]');
+            if (closeButton) closeButton.click();
+          });
+          
+          // Wait for the panel to be fully closed
+          await this.page.waitForFunction(() => {
+            const mainDivs = document.querySelectorAll('div[role="main"]');
+            return mainDivs.length === 1;
+          });
+
         } catch (error) {
           console.error("Error processing restaurant:", error);
           continue;
@@ -177,6 +240,7 @@ class RestaurantScraper {
 }
 
 async function main() {
+  const startTime = Date.now();
   const { browser, page } = await initBrowser();
   
   try {
@@ -189,6 +253,8 @@ async function main() {
     console.error('Error:', error);
   } finally {
     await browser.close();
+    const endTime = Date.now();
+    console.log(`Scraping completed in ${Math.floor((endTime - startTime) / 1000)} seconds`);
   }
 }
 
