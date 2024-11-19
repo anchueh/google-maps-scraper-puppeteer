@@ -40,7 +40,6 @@ async function readCsvFile(filePath) {
     });
 }
 
-// Add benchmark tracking function
 async function trackPerformance() {
     try {
         const stats = await pidusage(process.pid);
@@ -51,20 +50,17 @@ async function trackPerformance() {
     }
 }
 
-// Modify scrapeWithConcurrency to include performance tracking
-async function scrapeWithConcurrency(queries, concurrentLimit = 10) {
+async function scrapeWithConcurrency(queries, concurrentLimit = 20) {
     const performanceInterval = setInterval(trackPerformance, 5000);
     
     try {
         const chunks = [];
         const results = [];
         
-        // Split queries into chunks
         for (let i = 0; i < queries.length; i += concurrentLimit) {
             chunks.push(queries.slice(i, i + concurrentLimit));
         }
         
-        // Process chunks sequentially, but queries within chunk concurrently
         for (let i = 0; i < chunks.length; i++) {
             const chunk = chunks[i];
             console.log(`Processing chunk ${i + 1}/${chunks.length}`);
@@ -77,11 +73,9 @@ async function scrapeWithConcurrency(queries, concurrentLimit = 10) {
                 return tmpFile;
             });
 
-            // Wait for current chunk to complete before moving to next
             const chunkResults = await Promise.all(chunkPromises);
             results.push(...chunkResults);
             
-            // Add delay between chunks
             if (i < chunks.length - 1) {
                 console.log('Waiting between chunks...');
                 await new Promise(resolve => setTimeout(resolve, 5000));
@@ -100,10 +94,8 @@ async function main() {
     try {
         await ensureTmpDir();
         
-        // Replace the for loop with the concurrent scraping
-        await scrapeWithConcurrency(queriesData.queries.slice(0, 1));
+        await scrapeWithConcurrency(queriesData.queries);
 
-        // Merge all files
         const tmpFiles = await fs.readdir(TMP_DIR);
         let allRestaurants = [];
 
@@ -114,11 +106,9 @@ async function main() {
             allRestaurants = [...allRestaurants, ...restaurants];
         }
 
-        // Remove duplicates
         const uniqueRestaurants = getUniqueRestaurants(allRestaurants);
         console.log(`Found ${uniqueRestaurants.length} unique restaurants out of ${allRestaurants.length} total`);
 
-        // Save final results
         const csvContent = [
             Object.keys(uniqueRestaurants[0]).join(','),
             ...uniqueRestaurants.map(item => Object.values(item).join(','))
@@ -127,7 +117,6 @@ async function main() {
         await fs.writeFile(FINAL_OUTPUT, csvContent);
         console.log(`Final results saved to ${FINAL_OUTPUT}`);
 
-        // Clean up tmp directory
         await fs.rm(TMP_DIR, { recursive: true });
     } finally {
         const executionTime = (Date.now() - startTime) / 1000;

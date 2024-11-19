@@ -32,14 +32,12 @@ const extractDetailedInfo = () => {
   const mainDiv = mainDivs[1];
   if (!mainDiv) return null;
 
-  // business_types: transform_string_array(place[:types], required: true),
-  // business_status: transform_string(place[:business_status]),
-  // operating_hours: transform_hash(place[:current_opening_hours]),
-  // primary_business_type: transform_string(place[:primary_type]),
-  // image_urls: transform_string_array(extract_photo_urls(place[:photos])),
-  // reviews: transform_hash_array(place[:reviews]),
-
   const name = mainDiv.querySelector('h1, h2')?.textContent || 'N/A';
+
+  // TODO: Wait for the image to load
+  const imageElement = mainDiv.querySelector('button[aria-label*="Photo of"] > img');
+  const imageUrl = imageElement ? imageElement.src || 'N/A' : 'N/A';
+
   const fullAddress = mainDiv.querySelector('button[data-item-id^="address"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
   const phoneNumber = mainDiv.querySelector('button[data-item-id^="phone"] > div > div:nth-child(2) > div')?.textContent?.replace(/\s+/g, '') || 'N/A';
   const websiteUrl = mainDiv.querySelector('a[data-item-id^="authority"]')?.href || 'N/A';
@@ -66,15 +64,52 @@ const extractDetailedInfo = () => {
     }
   }
 
+  const hoursPreviousDiv = mainDiv.querySelector('div[role="button"][jsaction*="openhours"]');
+  const operatingHours = {};
+  
+  if (hoursPreviousDiv) {
+    const hoursDiv = hoursPreviousDiv.nextElementSibling;
+    const hoursText = hoursDiv?.getAttribute('aria-label') || '';
+    
+    const hoursParts = hoursText.split(';').map(part => part.trim())
+      .filter(part => !part.includes('Hide open hours'));
+
+    hoursParts.forEach(part => {
+      const [day, hours] = part.split(',').map(s => s.trim());
+      if (day && hours) {
+        operatingHours[day] = hours;
+      }
+    });
+  }
+
+  const reviewElements = mainDiv.querySelectorAll('div[data-review-id]');
+  const reviews = reviewElements ? Array.from(reviewElements).map(reviewElement => {
+    const reviewerName = reviewElement.querySelector('div[class] > div > div > div > span')?.textContent || 'N/A';
+    const ratingElement = reviewElement.querySelector('span[role="img"]');
+    const rating = ratingElement ? parseInt(ratingElement.getAttribute('aria-label')?.split(' ')[0] || '0') : 0;
+    const reviewText = reviewElement.querySelector('span[class] > span:last-child')?.textContent || 'N/A';
+    const timeAgo = reviewElement.querySelector('div[class] > div > div > span:last-child')?.textContent || 'N/A';
+
+    return {
+      reviewerName,
+      rating,
+      reviewText,
+      timeAgo
+    };
+  }) : "N/A";
+
   return { 
     name, 
+    imageUrls: JSON.stringify([imageUrl]), 
     phoneNumber, 
     websiteUrl, 
     fullAddress,
     suburb,
     state,
     postcode,
-    country
+    country,
+    operatingHours: JSON.stringify(operatingHours),
+    reviews: JSON.stringify(reviews)
   };
 }
 
@@ -90,20 +125,24 @@ const extractBriefInfo = (item) => {
   const parent = item.parentElement;
 
   const ratingText = parent.querySelector('span.fontBodyMedium > span')?.getAttribute('aria-label') || 'N/A';
-  const bodyDiv = parent.querySelector('div.fontBodyMedium');
-  const firstRow = bodyDiv?.children[0]?.textContent || '';
-  const category = firstRow.split('·')[0]?.trim() || 'N/A';
-
   const googleRating = ratingText !== 'N/A' ? parseFloat(ratingText.split('stars')[0]?.trim()) : null;
   const userRatingCount = ratingText !== 'N/A' 
     ? parseInt(ratingText.split('stars')[1]?.replace('Reviews', '')?.trim()) 
     : null;
 
+  const secondBodyDiv = parent.querySelector('div.fontBodyMedium:nth-child(2)');
+  const businessTypes = Array.from(secondBodyDiv?.children || [])
+    .map(child => child.querySelector('div > span')?.textContent.trim())
+    .filter(Boolean) || [];
+
+  const primaryBusinessType = businessTypes[0] || 'N/A';
+
   return { 
     placeId, 
     latitude, 
     longitude,
-    category,
+    primaryBusinessType,
+    businessTypes: JSON.stringify(businessTypes),
     googleRating,
     userRatingCount
   };
@@ -164,7 +203,6 @@ class RestaurantScraper {
           lastHeight
         );
 
-        // Check for end of list
         const endOfList = await this.page.evaluate(() => {
           const endText = document.evaluate(
             "//*[contains(text(), 'reached the end of the list')]",
@@ -284,14 +322,12 @@ class RestaurantScraper {
 
           const closingSuccess = await executeWithRetry({
             func: async (retryCount) => {
-              // Get specifically the second div[role="main"] and its Close button
               await this.page.evaluate(() => {
                 const mainDivs = document.querySelectorAll('div[role="main"]');
                 const closeButton = mainDivs[1].querySelector('button[aria-label="Close"]');
                 if (closeButton) closeButton.click();
               });
           
-              // Wait for the panel to be fully closed
               await this.page.waitForFunction(() => {
                 const mainDivs = document.querySelectorAll('div[role="main"]');
                 return mainDivs.length === 1;
