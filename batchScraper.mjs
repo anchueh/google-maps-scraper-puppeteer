@@ -315,7 +315,7 @@ async function main() {
         await ensureTmpDir();
         
         // Replace the for loop with the concurrent scraping
-        await scrapeWithConcurrency(QUERIES.slice(0, 1));
+        await scrapeWithConcurrency(QUERIES);
 
         // Merge all files
         const tmpFiles = await fs.readdir(TMP_DIR);
