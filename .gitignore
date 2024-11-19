@@ -21,3 +21,7 @@ restaurants.csv
 .vscode/
 *.swp
 *.swo
+
+# Temporary files
+tmp/
+*.csv

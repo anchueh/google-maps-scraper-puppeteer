@@ -19,6 +19,25 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function executeWithRetry({ func, retries = 3, actionName }) {
+  const maxRetries = retries;
+  let retryCount = 0;
+  let success = false;
+
+  while (!success && retryCount < maxRetries) {
+    try {
+      await func(retryCount);
+      success = true;
+    } catch (error) {
+      console.log(`${actionName} failed, retrying... (${retryCount}/${maxRetries})`);
+      retryCount++;
+      await delay(1000);
+    }
+  }
+
+  return success;
+}
+
 class RestaurantScraper {
   constructor(browser, page) {
     this.browser = browser;
@@ -115,18 +134,14 @@ class RestaurantScraper {
 
         const name = mainDiv.querySelector('h1, h2')?.textContent || 'N/A';
         
-        const addressButton = mainDiv.querySelector('button[data-item-id^="address"]');
-        const address = addressButton ? addressButton.textContent.replace(/[^\w\s,.-]/g, '').replace(/\s+/g, ' ').trim() : 'N/A';
+        const address =
+          mainDiv.querySelector('button[data-item-id^="address"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
         
-        const phoneButton = mainDiv.querySelector('button[data-item-id^="phone"]');
-        let phone = phoneButton ? phoneButton.textContent : 'N/A';
-        const phoneMatch = phone.match(/(?:\+\d{1,3}[\s.-]?)?\(?\d{1,4}\)?[\s.-]?\d{1,4}[\s.-]?\d{1,4}/);
-        phone = phoneMatch ? phoneMatch[0].replace(/[^\d+]/g, ' ').replace(/\s+/g, ' ').trim() : phone;
+        const phone =
+          mainDiv.querySelector('button[data-item-id^="phone"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
         
-        const websiteButton = mainDiv.querySelector('a[data-item-id^="authority"]');
-        let website = websiteButton ? websiteButton.textContent : 'N/A';
-        const websiteMatch = website.match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+)/);
-        website = websiteMatch ? websiteMatch[1] : website;
+        const website =
+          mainDiv.querySelector('a[data-item-id^="authority"]')?.href || 'N/A';
 
         return { name, phone, website, address };
       });
@@ -150,31 +165,39 @@ class RestaurantScraper {
 
       for (let i = 0; i < restaurantLinks.length; i++) {
         console.log(`Processing item #${i + 1} out of ${restaurantLinks.length}`);
+
+        const placeId = await restaurantLinks[i].evaluate(link => {
+          return (link.href || '').match(/!19s(.*?)\?|!19s(.*?)$/)?.[1] || 'N/A';
+        }).catch(() => 'N/A');
         
         try {
-          await this.page.evaluate((link) => {
-            link.scrollIntoView();
-          }, restaurantLinks[i]);
-          
-          await this.page.waitForFunction(
-            (link) => {
-              const rect = link.getBoundingClientRect();
-              return rect.top >= 0 && rect.bottom <= window.innerHeight;
+          const scrollingSuccess = await executeWithRetry({
+            func: async (retryCount) => {
+              await this.page.evaluate((link) => {
+                link.scrollIntoView();
+              }, restaurantLinks[i]);
+              
+              await this.page.waitForFunction(
+                (link) => {
+                  const rect = link.getBoundingClientRect();
+                  return rect.top >= 0 && rect.bottom <= window.innerHeight;
+                },
+                { timeout: 2000 * (retryCount + 1) },
+                restaurantLinks[i]
+              );
             },
-            {},
-            restaurantLinks[i]
-          );
+            actionName: `Scrolling to restaurant ${i + 1}`
+          });
 
-          // Add retry mechanism for clicking and waiting
-          let retryCount = 0;
-          const maxRetries = 3;
-          let success = false;
+          if (!scrollingSuccess) {
+            console.error(`Failed to scroll to restaurant ${i + 1} after ${scrollingMaxRetries} attempts`);
+            continue;
+          }
 
-          while (!success && retryCount < maxRetries) {
-            try {
+          const restaurantClickingSuccess = await executeWithRetry({
+            func: async (retryCount) => {
               await restaurantLinks[i].click();
               
-              // Wait for both conditions with a reasonable timeout
               await this.page.waitForFunction(
                 () => {
                   const mainDivs = document.querySelectorAll('div[role="main"]');
@@ -182,39 +205,44 @@ class RestaurantScraper {
                 },
                 { timeout: 2000 * (retryCount + 1) }
               );
-              
-              success = true;
-            } catch (error) {
-              retryCount++;
-              console.log(`Retry ${retryCount}/${maxRetries} for restaurant ${i + 1}`);
-              // Wait a bit before retrying
-              await delay(1000);
-            }
-          }
+            },
+            actionName: `Clicking restaurant ${i + 1}`
+          });
 
-          if (!success) {
-            console.error(`Failed to open details for restaurant ${i + 1} after ${maxRetries} attempts`);
+          if (!restaurantClickingSuccess) {
+            console.error(`Failed to open details for restaurant ${i + 1} after ${restaurantClickingMaxRetries} attempts`);
             continue;
           }
 
           const restaurantInfo = await this.extractRestaurantInfo();
           if (restaurantInfo) {
-            restaurantsData.push(restaurantInfo);
-            console.log(`Scraped: ${restaurantInfo.name}`);
+            restaurantsData.push({ ...restaurantInfo, placeId });
+            console.log(`Scraped: ${restaurantInfo.name} (${placeId})`);
           }
 
-          // Get specifically the second div[role="main"] and its Close button
-          await this.page.evaluate(() => {
-            const mainDivs = document.querySelectorAll('div[role="main"]');
-            const closeButton = mainDivs[1].querySelector('button[aria-label="Close"]');
-            if (closeButton) closeButton.click();
-          });
+          const closingSuccess = await executeWithRetry({
+            func: async (retryCount) => {
+              // Get specifically the second div[role="main"] and its Close button
+              await this.page.evaluate(() => {
+                const mainDivs = document.querySelectorAll('div[role="main"]');
+                const closeButton = mainDivs[1].querySelector('button[aria-label="Close"]');
+                if (closeButton) closeButton.click();
+              });
           
-          // Wait for the panel to be fully closed
-          await this.page.waitForFunction(() => {
-            const mainDivs = document.querySelectorAll('div[role="main"]');
-            return mainDivs.length === 1;
+              // Wait for the panel to be fully closed
+              await this.page.waitForFunction(() => {
+                const mainDivs = document.querySelectorAll('div[role="main"]');
+                return mainDivs.length === 1;
+              }, { timeout: 2000 * (retryCount + 1) });
+
+            },
+            actionName: `Closing restaurant ${i + 1}`
           });
+
+          if (!closingSuccess) {
+            console.error(`Failed to close restaurant ${i + 1} after ${closingMaxRetries} attempts`);
+            continue;
+          }
 
         } catch (error) {
           console.error("Error processing restaurant:", error);
@@ -228,7 +256,12 @@ class RestaurantScraper {
     return restaurantsData;
   }
 
-  async saveToCSV(data, filename = 'restaurants.csv') {
+  async saveToCSV(data, filename) {
+    if (!data || data.length === 0) {
+      console.log('No data to save');
+      return;
+    }
+    
     const csvContent = [
       Object.keys(data[0]).join(','),
       ...data.map(item => Object.values(item).join(','))
@@ -239,23 +272,23 @@ class RestaurantScraper {
   }
 }
 
-async function main() {
+export async function scrapeQuery(searchQuery, outputFile) {
   const startTime = Date.now();
   const { browser, page } = await initBrowser();
   
   try {
-    await searchGoogleMaps(page, 'restaurant near Keiraville, New South Wales, Australia');
+    await searchGoogleMaps(page, searchQuery);
     
     const scraper = new RestaurantScraper(browser, page);
     const restaurantsData = await scraper.scrapeRestaurants();
-    await scraper.saveToCSV(restaurantsData);
+    await scraper.saveToCSV(restaurantsData, outputFile);
+    return restaurantsData;
   } catch (error) {
     console.error('Error:', error);
+    return [];
   } finally {
     await browser.close();
     const endTime = Date.now();
     console.log(`Scraping completed in ${Math.floor((endTime - startTime) / 1000)} seconds`);
   }
 }
-
-main().catch(console.error);
