@@ -117,7 +117,7 @@ async function main() {
         await fs.writeFile(FINAL_OUTPUT, csvContent);
         console.log(`Final results saved to ${FINAL_OUTPUT}`);
 
-        await fs.rm(TMP_DIR, { recursive: true });
+        // await fs.rm(TMP_DIR, { recursive: true });
     } finally {
         const executionTime = (Date.now() - startTime) / 1000;
         console.log(`Total execution time: ${executionTime.toFixed(2)} seconds`);
