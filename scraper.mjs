@@ -317,7 +317,7 @@ class RestaurantScraper {
           if (detailedInfo) {
             restaurantsData.push(newItem);
             console.log(`Scraped: ${detailedInfo.name} (${briefInfo.placeId})`);
-            console.log(newItem);
+            // console.log(newItem);
           }
 
           const closingSuccess = await executeWithRetry({
