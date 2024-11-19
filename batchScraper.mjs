@@ -50,7 +50,7 @@ async function trackPerformance() {
     }
 }
 
-async function scrapeWithConcurrency(queries, concurrentLimit = 20) {
+async function scrapeWithConcurrency(queries, concurrentLimit = 15) {
     const performanceInterval = setInterval(trackPerformance, 5000);
     
     try {
