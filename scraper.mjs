@@ -19,7 +19,97 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function executeWithRetry({ func, retries = 3, actionName }) {
+function decamelize(str) {
+  return str.replace(/([A-Z])/g, '_$1').toLowerCase();
+}
+
+function decamelizeKeys(obj) {
+  return Object.fromEntries(Object.entries(obj).map(([key, value]) => [decamelize(key), value]));
+}
+
+const extractDetailedInfo = () => {
+  const mainDivs = document.querySelectorAll('div[role="main"]');
+  const mainDiv = mainDivs[1];
+  if (!mainDiv) return null;
+
+  // business_types: transform_string_array(place[:types], required: true),
+  // business_status: transform_string(place[:business_status]),
+  // operating_hours: transform_hash(place[:current_opening_hours]),
+  // primary_business_type: transform_string(place[:primary_type]),
+  // image_urls: transform_string_array(extract_photo_urls(place[:photos])),
+  // reviews: transform_hash_array(place[:reviews]),
+
+  const name = mainDiv.querySelector('h1, h2')?.textContent || 'N/A';
+  const fullAddress = mainDiv.querySelector('button[data-item-id^="address"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
+  const phoneNumber = mainDiv.querySelector('button[data-item-id^="phone"] > div > div:nth-child(2) > div')?.textContent?.replace(/\s+/g, '') || 'N/A';
+  const websiteUrl = mainDiv.querySelector('a[data-item-id^="authority"]')?.href || 'N/A';
+
+  const addressParts = fullAddress.split(',').map(part => part.trim());
+        
+  let suburb = 'N/A';
+  let state = 'N/A';
+  let postcode = 'N/A';
+  let country = 'N/A';
+
+  if (addressParts.length > 0) {
+    country = addressParts[addressParts.length - 1] || 'N/A';
+
+    const statePostcodePart = addressParts[addressParts.length - 2] || '';
+    const statePostcodeMatch = statePostcodePart.match(/(?:(NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\s+(\d{4}))/i);
+    if (statePostcodeMatch) {
+      state = statePostcodeMatch[1].toUpperCase();
+      postcode = statePostcodeMatch[2];
+    }
+
+    if (addressParts.length > 2) {
+      suburb = addressParts[addressParts.length - 3].replace(/^\d+\s+/, '').trim();
+    }
+  }
+
+  return { 
+    name, 
+    phoneNumber, 
+    websiteUrl, 
+    fullAddress,
+    suburb,
+    state,
+    postcode,
+    country
+  };
+}
+
+const extractBriefInfo = (item) => {
+  const href = item.href;
+  const placeId = (href || '').match(/!19s(.*?)\?|!19s(.*?)$/)?.[1] || 'N/A';
+  const latMatch = href.match(/!3d(-?\d+\.\d+)/);
+  const lngMatch = href.match(/!4d(-?\d+\.\d+)/);
+      
+  const latitude = latMatch ? parseFloat(latMatch[1]) : null;
+  const longitude = lngMatch ? parseFloat(lngMatch[1]) : null;
+
+  const parent = item.parentElement;
+
+  const ratingText = parent.querySelector('span.fontBodyMedium > span')?.getAttribute('aria-label') || 'N/A';
+  const bodyDiv = parent.querySelector('div.fontBodyMedium');
+  const firstRow = bodyDiv?.children[0]?.textContent || '';
+  const category = firstRow.split('·')[0]?.trim() || 'N/A';
+
+  const googleRating = ratingText !== 'N/A' ? parseFloat(ratingText.split('stars')[0]?.trim()) : null;
+  const userRatingCount = ratingText !== 'N/A' 
+    ? parseInt(ratingText.split('stars')[1]?.replace('Reviews', '')?.trim()) 
+    : null;
+
+  return { 
+    placeId, 
+    latitude, 
+    longitude,
+    category,
+    googleRating,
+    userRatingCount
+  };
+}
+
+const executeWithRetry = async ({ func, retries = 3, actionName }) => {
   const maxRetries = retries;
   let retryCount = 0;
   let success = false;
@@ -123,37 +213,6 @@ class RestaurantScraper {
     }
   }
 
-  async extractRestaurantInfo() {
-    try {
-      await this.page.waitForSelector('div[role="main"]');
-      
-      const restaurantInfo = await this.page.evaluate(() => {
-        const mainDivs = document.querySelectorAll('div[role="main"]');
-        const mainDiv = mainDivs[1];
-        if (!mainDiv) return null;
-
-        const name = mainDiv.querySelector('h1, h2')?.textContent || 'N/A';
-        
-        const address =
-          mainDiv.querySelector('button[data-item-id^="address"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
-        
-        const phone =
-          mainDiv.querySelector('button[data-item-id^="phone"] > div > div:nth-child(2) > div')?.textContent || 'N/A';
-        
-        const website =
-          mainDiv.querySelector('a[data-item-id^="authority"]')?.href || 'N/A';
-
-        return { name, phone, website, address };
-      });
-
-      console.log("Extracted:", restaurantInfo);
-      return restaurantInfo;
-    } catch (error) {
-      console.error("Error extracting restaurant info:", error);
-      return null;
-    }
-  }
-
   async scrapeRestaurants() {
     const restaurantsData = [];
     
@@ -166,9 +225,7 @@ class RestaurantScraper {
       for (let i = 0; i < restaurantLinks.length; i++) {
         console.log(`Processing item #${i + 1} out of ${restaurantLinks.length}`);
 
-        const placeId = await restaurantLinks[i].evaluate(link => {
-          return (link.href || '').match(/!19s(.*?)\?|!19s(.*?)$/)?.[1] || 'N/A';
-        }).catch(() => 'N/A');
+        const briefInfo = await restaurantLinks[i].evaluate(extractBriefInfo);
         
         try {
           const scrollingSuccess = await executeWithRetry({
@@ -214,10 +271,15 @@ class RestaurantScraper {
             continue;
           }
 
-          const restaurantInfo = await this.extractRestaurantInfo();
-          if (restaurantInfo) {
-            restaurantsData.push({ ...restaurantInfo, placeId });
-            console.log(`Scraped: ${restaurantInfo.name} (${placeId})`);
+          const detailedInfo = await this.page.evaluate(extractDetailedInfo);
+          const newItem = decamelizeKeys({
+            ...detailedInfo,
+            ...briefInfo
+          });
+          if (detailedInfo) {
+            restaurantsData.push(newItem);
+            console.log(`Scraped: ${detailedInfo.name} (${briefInfo.placeId})`);
+            console.log(newItem);
           }
 
           const closingSuccess = await executeWithRetry({
